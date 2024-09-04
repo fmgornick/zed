@@ -234,6 +234,9 @@ pub struct Style {
     /// The mouse cursor style shown when the mouse pointer is over an element.
     pub mouse_cursor: Option<CursorStyle>,
 
+    /// The opacity of this element
+    pub opacity: Option<f32>,
+
     /// Whether to draw a red debugging outline around this element
     #[cfg(debug_assertions)]
     pub debug: bool,
@@ -282,6 +285,16 @@ pub enum WhiteSpace {
     Nowrap,
 }
 
+/// How to truncate text that overflows the width of the element
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Truncate {
+    /// Truncate the text without an ellipsis
+    #[default]
+    Truncate,
+    /// Truncate the text with an ellipsis
+    Ellipsis,
+}
+
 /// The properties that can be used to style text in GPUI
 #[derive(Refineable, Clone, Debug, PartialEq)]
 #[refineable(Debug)]
@@ -321,6 +334,9 @@ pub struct TextStyle {
 
     /// How to handle whitespace in the text
     pub white_space: WhiteSpace,
+
+    /// The text should be truncated if it overflows the width of the element
+    pub truncate: Option<Truncate>,
 }
 
 impl Default for TextStyle {
@@ -345,6 +361,7 @@ impl Default for TextStyle {
             underline: None,
             strikethrough: None,
             white_space: WhiteSpace::Normal,
+            truncate: None,
         }
     }
 }
@@ -680,6 +697,7 @@ impl Default for Style {
             box_shadow: Default::default(),
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
+            opacity: None,
 
             #[cfg(debug_assertions)]
             debug: false,

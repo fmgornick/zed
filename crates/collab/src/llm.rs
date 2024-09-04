@@ -9,6 +9,7 @@ use crate::{
 };
 use anyhow::{anyhow, Context as _};
 use authorization::authorize_access_to_language_model;
+use axum::routing::get;
 use axum::{
     body::Body,
     http::{self, HeaderName, HeaderValue, Request, StatusCode},
@@ -22,6 +23,7 @@ use collections::HashMap;
 use db::{usage_measure::UsageMeasure, ActiveUserCount, LlmDatabase};
 use futures::{Stream, StreamExt as _};
 use http_client::IsahcHttpClient;
+use rpc::ListModelsResponse;
 use rpc::{
     proto::Plan, LanguageModelProvider, PerformCompletionParams, EXPIRED_LLM_TOKEN_HEADER_NAME,
 };
@@ -114,6 +116,7 @@ impl LlmState {
 
 pub fn routes() -> Router<(), Body> {
     Router::new()
+        .route("/models", get(list_models))
         .route("/completion", post(perform_completion))
         .layer(middleware::from_fn(validate_api_token))
 }
@@ -173,6 +176,37 @@ async fn validate_api_token<B>(mut req: Request<B>, next: Next<B>) -> impl IntoR
     }
 }
 
+async fn list_models(
+    Extension(state): Extension<Arc<LlmState>>,
+    Extension(claims): Extension<LlmTokenClaims>,
+    country_code_header: Option<TypedHeader<CloudflareIpCountryHeader>>,
+) -> Result<Json<ListModelsResponse>> {
+    let country_code = country_code_header.map(|header| header.to_string());
+
+    let mut accessible_models = Vec::new();
+
+    for (provider, model) in state.db.all_models() {
+        let authorize_result = authorize_access_to_language_model(
+            &state.config,
+            &claims,
+            country_code.as_deref(),
+            provider,
+            &model.name,
+        );
+
+        if authorize_result.is_ok() {
+            accessible_models.push(rpc::LanguageModel {
+                provider,
+                name: model.name,
+            });
+        }
+    }
+
+    Ok(Json(ListModelsResponse {
+        models: accessible_models,
+    }))
+}
+
 async fn perform_completion(
     Extension(state): Extension<Arc<LlmState>>,
     Extension(claims): Extension<LlmTokenClaims>,
@@ -187,7 +221,9 @@ async fn perform_completion(
     authorize_access_to_language_model(
         &state.config,
         &claims,
-        country_code_header.map(|header| header.to_string()),
+        country_code_header
+            .map(|header| header.to_string())
+            .as_deref(),
         params.provider,
         &model,
     )?;
@@ -237,10 +273,22 @@ async fn perform_completion(
             .await
             .map_err(|err| match err {
                 anthropic::AnthropicError::ApiError(ref api_error) => match api_error.code() {
-                    Some(anthropic::ApiErrorCode::RateLimitError) => Error::http(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "Upstream Anthropic rate limit exceeded.".to_string(),
-                    ),
+                    Some(anthropic::ApiErrorCode::RateLimitError) => {
+                        tracing::info!(
+                            target: "upstream rate limit exceeded",
+                            user_id = claims.user_id,
+                            login = claims.github_user_login,
+                            authn.jti = claims.jti,
+                            is_staff = claims.is_staff,
+                            provider = params.provider.to_string(),
+                            model = model
+                        );
+
+                        Error::http(
+                            StatusCode::TOO_MANY_REQUESTS,
+                            "Upstream Anthropic rate limit exceeded.".to_string(),
+                        )
+                    }
                     Some(anthropic::ApiErrorCode::InvalidRequestError) => {
                         Error::http(StatusCode::BAD_REQUEST, api_error.message.clone())
                     }
@@ -411,6 +459,11 @@ fn normalize_model_name(known_models: Vec<String>, name: String) -> String {
     }
 }
 
+/// The maximum lifetime spending an individual user can reach before being cut off.
+///
+/// Represented in cents.
+const LIFETIME_SPENDING_LIMIT_IN_CENTS: usize = 1_000 * 100;
+
 async fn check_usage_limit(
     state: &Arc<LlmState>,
     provider: LanguageModelProvider,
@@ -427,6 +480,13 @@ async fn check_usage_limit(
             Utc::now(),
         )
         .await?;
+
+    if usage.lifetime_spending >= LIFETIME_SPENDING_LIMIT_IN_CENTS {
+        return Err(Error::http(
+            StatusCode::FORBIDDEN,
+            "Maximum spending limit reached.".to_string(),
+        ));
+    }
 
     let active_users = state.get_active_user_count(provider, model_name).await?;
 
