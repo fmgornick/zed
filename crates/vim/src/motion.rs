@@ -706,7 +706,8 @@ impl Motion {
                 end_of_document(map, point, maybe_times),
                 SelectionGoal::None,
             ),
-            Matching => (matching(map, point), SelectionGoal::None),
+            // %
+            Matching => (movement::matching(map, point), SelectionGoal::None),
             // t f
             FindForward {
                 before,
@@ -1697,60 +1698,6 @@ fn end_of_document(
     map.clip_point(new_point.to_display_point(map), Bias::Left)
 }
 
-fn matching(map: &DisplaySnapshot, display_point: DisplayPoint) -> DisplayPoint {
-    // https://github.com/vim/vim/blob/1d87e11a1ef201b26ed87585fba70182ad0c468a/runtime/doc/motion.txt#L1200
-    let display_point = map.clip_at_line_end(display_point);
-    let point = display_point.to_point(map);
-    let offset = point.to_offset(&map.buffer_snapshot);
-
-    // Ensure the range is contained by the current line.
-    let mut line_end = map.next_line_boundary(point).0;
-    if line_end == point {
-        line_end = map.max_point().to_point(map);
-    }
-
-    let line_range = map.prev_line_boundary(point).0..line_end;
-    let visible_line_range =
-        line_range.start..Point::new(line_range.end.row, line_range.end.column.saturating_sub(1));
-    let ranges = map
-        .buffer_snapshot
-        .bracket_ranges(visible_line_range.clone());
-    if let Some(ranges) = ranges {
-        let line_range = line_range.start.to_offset(&map.buffer_snapshot)
-            ..line_range.end.to_offset(&map.buffer_snapshot);
-        let mut closest_pair_destination = None;
-        let mut closest_distance = usize::MAX;
-
-        for (open_range, close_range) in ranges {
-            if open_range.start >= offset && line_range.contains(&open_range.start) {
-                let distance = open_range.start - offset;
-                if distance < closest_distance {
-                    closest_pair_destination = Some(close_range.start);
-                    closest_distance = distance;
-                    continue;
-                }
-            }
-
-            if close_range.start >= offset && line_range.contains(&close_range.start) {
-                let distance = close_range.start - offset;
-                if distance < closest_distance {
-                    closest_pair_destination = Some(open_range.start);
-                    closest_distance = distance;
-                    continue;
-                }
-            }
-
-            continue;
-        }
-
-        closest_pair_destination
-            .map(|destination| destination.to_display_point(map))
-            .unwrap_or(display_point)
-    } else {
-        display_point
-    }
-}
-
 fn find_forward(
     map: &DisplaySnapshot,
     from: DisplayPoint,
@@ -2030,51 +1977,6 @@ mod test {
 
                 third and
                 final"});
-    }
-
-    #[gpui::test]
-    async fn test_matching(cx: &mut gpui::TestAppContext) {
-        let mut cx = NeovimBackedTestContext::new(cx).await;
-
-        cx.set_shared_state(indoc! {r"func ˇ(a string) {
-                do(something(with<Types>.and_arrays[0, 2]))
-            }"})
-            .await;
-        cx.simulate_shared_keystrokes("%").await;
-        cx.shared_state()
-            .await
-            .assert_eq(indoc! {r"func (a stringˇ) {
-                do(something(with<Types>.and_arrays[0, 2]))
-            }"});
-
-        // test it works on the last character of the line
-        cx.set_shared_state(indoc! {r"func (a string) ˇ{
-            do(something(with<Types>.and_arrays[0, 2]))
-            }"})
-            .await;
-        cx.simulate_shared_keystrokes("%").await;
-        cx.shared_state()
-            .await
-            .assert_eq(indoc! {r"func (a string) {
-            do(something(with<Types>.and_arrays[0, 2]))
-            ˇ}"});
-
-        // test it works on immediate nesting
-        cx.set_shared_state("ˇ{()}").await;
-        cx.simulate_shared_keystrokes("%").await;
-        cx.shared_state().await.assert_eq("{()ˇ}");
-        cx.simulate_shared_keystrokes("%").await;
-        cx.shared_state().await.assert_eq("ˇ{()}");
-
-        // test it works on immediate nesting inside braces
-        cx.set_shared_state("{\n    ˇ{()}\n}").await;
-        cx.simulate_shared_keystrokes("%").await;
-        cx.shared_state().await.assert_eq("{\n    {()ˇ}\n}");
-
-        // test it jumps to the next paren on a line
-        cx.set_shared_state("func ˇboop() {\n}").await;
-        cx.simulate_shared_keystrokes("%").await;
-        cx.shared_state().await.assert_eq("func boop(ˇ) {\n}");
     }
 
     #[gpui::test]
